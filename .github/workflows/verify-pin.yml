@@ -54,7 +54,14 @@ jobs:
 
           # ONE ANCHORED LINE, not a broad search. scan.yml also carries the pinned
           # actions/checkout SHA, and neither may be mistaken for the other.
-          pin="$(sed -n "s/.*CUPEL_CLI_VERSION: \${{ inputs.cli-version || '\([^']*\)' }}.*/\1/p" \
+          #
+          # THE PATTERN DELIBERATELY STOPS SHORT OF THE EXPRESSION DELIMITERS. Actions
+          # evaluates an expression inside a `run:` block before the shell ever sees the text,
+          # so writing the full interpolation here does not quote it — it makes this file fail
+          # to compile, with "a workflow file issue" and no line number. Matching on
+          # `inputs.cli-version || '...'` is enough to be unambiguous and contains nothing the
+          # expression parser claims.
+          pin="$(sed -n "s/.*inputs\.cli-version || '\([^']*\)'.*/\1/p" \
             .github/workflows/scan.yml)"
 
           if [ -z "$pin" ]; then
