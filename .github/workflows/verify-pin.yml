@@ -1,0 +1,96 @@
+name: verify pin
+
+# Is the engine version this workflow hands to every caller a real release?
+#
+# WHAT THIS CATCHES, in the words of the incident that produced it. `@cupel-sh/cli@0.0.0` was
+# published — as a 684-byte name-reservation stub that printed one line and exited 0. A
+# workflow pinned to it installed, ran, printed, exited 0, and GitHub drew a green tick for a
+# scan that never happened. The dashboard then reported the project as never scanned and told
+# the owner to add a workflow they already had.
+#
+# A MISSING VERSION WOULD HAVE BEEN A LOUD 404. A stub is worse than absent, and that is the
+# whole reason this job exists: it checks the pin RESOLVES and that what it resolves to is not
+# a stub.
+#
+# WHY THE CHECK LIVES HERE. The pin used to sit in the dashboard, which is where the check
+# used to sit with it. Callers now name this workflow instead, so this file decides what every
+# one of them executes — and a guard belongs against the thing it guards, not against a copy
+# of it in another repository.
+#
+# NIGHTLY AS WELL AS ON CHANGE. On a pull request it judges the pin being proposed. Nightly it
+# judges the pin in force, because npm is not immutable in the direction that matters: a
+# version can be unpublished, and the first sign would otherwise be a customer's scan failing.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # 04:10 UTC. Off the hour: the top of the hour is the busiest slot on shared runners.
+    - cron: "10 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-pin-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pin:
+    name: the pinned engine is a real release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the pin and judge it
+        run: |
+          set -euo pipefail
+
+          # ONE ANCHORED LINE, not a broad search. scan.yml also carries the pinned
+          # actions/checkout SHA, and neither may be mistaken for the other.
+          pin="$(sed -n "s/.*CUPEL_CLI_VERSION: \${{ inputs.cli-version || '\([^']*\)' }}.*/\1/p" \
+            .github/workflows/scan.yml)"
+
+          if [ -z "$pin" ]; then
+            echo "::error::Could not read the engine pin from .github/workflows/scan.yml." \
+                 "The line this reads may have been reworded — fix this check rather than" \
+                 "leaving it to pass by finding nothing."
+            exit 1
+          fi
+          echo "pinned: $pin"
+
+          # AN EXACT VERSION. A range or a dist-tag silently takes whatever was published last,
+          # which is the property the whole pin exists to deny.
+          if ! printf '%s' "$pin" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::'$pin' is not an exact version. A range or a tag takes whatever npm" \
+                 "served most recently, and every caller of this workflow would inherit it."
+            exit 1
+          fi
+
+          size="$(npm view "@cupel-sh/cli@${pin}" dist.unpackedSize 2>/dev/null || true)"
+
+          if [ -z "$size" ]; then
+            echo "::error::@cupel-sh/cli@${pin} is not published, or npm would not answer." \
+                 "Every caller of this workflow is currently pinned to it."
+            exit 1
+          fi
+
+          # THE FLOOR IS A PLAUSIBILITY TEST, NOT A MEASUREMENT. The real bundle is ~220 KB
+          # unpacked; the stub was 684 bytes. 10 KB sits far from both, so it cannot be
+          # tripped by an ordinary release and cannot be passed by a placeholder. It is
+          # deliberately not derived from whatever was last published — that number moves, and
+          # the next stub may not repeat the last one's size.
+          if [ "$size" -lt 10240 ]; then
+            echo "::error::@cupel-sh/cli@${pin} unpacks to ${size} bytes. That is a STUB, not" \
+                 "an engine — it will install, print, exit 0, and scan nothing, which reads as" \
+                 "a GREEN run and a dashboard that says the project was never scanned."
+            exit 1
+          fi
+
+          echo "ok: @cupel-sh/cli@${pin} is published and unpacks to ${size} bytes"
