@@ -1,0 +1,75 @@
+name: cupel scan
+
+# Your repository holds a pointer to this workflow; this file is the implementation.
+#
+# WHY IT IS SPLIT THAT WAY. The obvious design puts the whole job in your own
+# `.github/workflows/cupel.yml`: the checkout, the install, and an exact engine version. All
+# three are ours to maintain, and all three end up in a file only you can edit — so every
+# engine release leaves you on whatever version you installed with, and the only way forward
+# is a pull request in your repository for a change that is really ours.
+#
+# Inverting it fixes that for good. Your file names this workflow and nothing else, so the
+# version, the checkout pin and every future change live here, where we can ship them. Your
+# file is written once and does not need touching again.
+#
+# WHAT YOUR WORKFLOW MUST GRANT, and what each is for:
+#
+#   contents: read    the engine analyses your checked-out source
+#   id-token: write   findings are pushed with a GitHub-signed assertion naming the
+#                     repository, so there is no long-lived credential in your CI at all
+#
+# YOUR PERMISSIONS ARE A CEILING THIS FILE CANNOT RAISE. GitHub intersects the two, so nothing
+# added here can widen what you granted. That is worth stating rather than relying on: the
+# four lines in your own workflow are the complete extent of what this integration can reach,
+# and you can confirm that without reading this file.
+#
+# WHAT IT DELIBERATELY DOES NOT ASK FOR: `contents: write`, `pull-requests: write`, and access
+# to your secrets. cupel never writes to your repository, and this workflow must not become
+# the exception that makes that claim untrue.
+
+on:
+  workflow_call:
+    inputs:
+      cli-version:
+        description: >-
+          Pin a specific @cupel-sh/cli version instead of the one this workflow ships. Leave it
+          unset to receive engine updates automatically, which is the point of calling this
+          workflow rather than inlining it. Set it if your organisation requires a determinable
+          version of every tool that runs in CI.
+        required: false
+        type: string
+      working-directory:
+        description: Directory to scan, for a repository whose project is not at the root.
+        required: false
+        type: string
+        default: "."
+
+# Narrowed here as well as by the caller. The intersection means this cannot grant anything,
+# but stating it means a repository that grants broadly still runs this job with only what it
+# needs.
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  scan:
+    name: scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # Pinned by commit SHA, never by tag: a tag is a pointer its owner can move, and a SHA
+      # is the tree. That matters more here than in our own CI, because this runs inside your
+      # repository.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Scan and push findings
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          # The default is the version this workflow ships, and bumping it here is the whole of
+          # an engine upgrade for everyone on the moving tag. The input overrides it, so
+          # pinning costs you nothing but a line.
+          CUPEL_CLI_VERSION: ${{ inputs.cli-version || '0.1.0' }}
+        run: npx --yes "@cupel-sh/cli@${CUPEL_CLI_VERSION}" scan --push
