@@ -71,5 +71,5 @@ jobs:
           # The default is the version this workflow ships, and bumping it here is the whole of
           # an engine upgrade for everyone on the moving tag. The input overrides it, so
           # pinning costs you nothing but a line.
-          CUPEL_CLI_VERSION: ${{ inputs.cli-version || '0.1.0' }}
+          CUPEL_CLI_VERSION: ${{ inputs.cli-version || '0.2.0' }}
         run: npx --yes "@cupel-sh/cli@${CUPEL_CLI_VERSION}" scan --push
