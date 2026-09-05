@@ -63,7 +63,7 @@ runs in CI, pin the SHA instead — or keep `@v1` and pin only the engine:
 ```yaml
     uses: cupel-sh/scan-workflow/.github/workflows/scan.yml@v1
     with:
-      cli-version: "0.1.0"
+      cli-version: "0.2.0"
 ```
 
 This repository is public and its history is reviewable precisely so that trusting a moving tag
@@ -75,6 +75,41 @@ is a decision you can audit rather than one you have to take on faith.
 | --- | --- | --- |
 | `cli-version` | the version this workflow ships | Pin `@cupel-sh/cli` explicitly. |
 | `working-directory` | `.` | Scan a project that is not at the repository root. |
+| `entry` | — | The file your application starts from, when cupel cannot work it out. |
+
+### When you need `entry`
+
+cupel finds your application by looking for `main`, `bin` or `exports` in `package.json`, an
+`index.js`, a `start` script, or a `Procfile`. A project built by **Astro, Next, SvelteKit, Nuxt
+or Vite declares none of them** — the entry is a convention the framework resolves at build time,
+so there is no file in `package.json` to point at.
+
+When cupel finds nothing to start from it says so, loudly, and caps every verdict at `unknown`:
+
+```
+🛑 No entrypoint analyzed — this scan is NOT a clean bill of health.
+```
+
+That is honest — it will not tell you a dependency is unreachable when it never looked — but it
+is not much use. Point `entry` at the file your start script runs:
+
+```yaml
+    uses: cupel-sh/scan-workflow/.github/workflows/scan.yml@v1
+    with:
+      entry: src/server.ts
+```
+
+One per line if your app has several roots:
+
+```yaml
+    with:
+      entry: |
+        src/server.ts
+        src/worker.ts
+```
+
+Listing a root never narrows the scan: cupel unions what you give it with anything it found on
+its own.
 
 ## Reporting a problem
 

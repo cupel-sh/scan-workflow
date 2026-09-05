@@ -43,6 +43,17 @@ on:
         required: false
         type: string
         default: "."
+      entry:
+        description: >-
+          The file your application starts from, when cupel cannot work it out. It looks for
+          `main`, `bin` or `exports` in package.json, an index.js, a `start` script and a
+          Procfile — and a project built by Astro, Next, SvelteKit, Nuxt or Vite declares none
+          of them, because the entry is a convention its framework resolves at build time. With
+          nothing to start from, cupel analyses no application code and every verdict is capped
+          at `unknown`, which is honest and not much use. Point this at the file your start
+          script runs. One per line for an app with several roots.
+        required: false
+        type: string
 
 # Narrowed here as well as by the caller. The intersection means this cannot grant anything,
 # but stating it means a repository that grants broadly still runs this job with only what it
@@ -72,4 +83,17 @@ jobs:
           # an engine upgrade for everyone on the moving tag. The input overrides it, so
           # pinning costs you nothing but a line.
           CUPEL_CLI_VERSION: ${{ inputs.cli-version || '0.2.0' }}
-        run: npx --yes "@cupel-sh/cli@${CUPEL_CLI_VERSION}" scan --push
+          # THROUGH THE ENVIRONMENT, NOT INTO THE SCRIPT. `${{ }}` substitutes before bash sees
+          # the line, so an input interpolated directly into `run:` is a shell injection in your
+          # repository, executed with your job's permissions. Read as a variable it is data.
+          CUPEL_ENTRY: ${{ inputs.entry }}
+        run: |
+          set -- scan
+          # One entry per line, empty lines skipped. `--entry` is repeatable and the engine
+          # unions what you give it with anything it found by itself, so listing a root never
+          # narrows the scan.
+          while IFS= read -r line; do
+            [ -n "$line" ] && set -- "$@" --entry "$line"
+          done <<< "$CUPEL_ENTRY"
+          set -- "$@" --push
+          npx --yes "@cupel-sh/cli@${CUPEL_CLI_VERSION}" "$@"
