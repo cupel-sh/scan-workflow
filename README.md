@@ -63,7 +63,7 @@ runs in CI, pin the SHA instead — or keep `@v1` and pin only the engine:
 ```yaml
     uses: cupel-sh/scan-workflow/.github/workflows/scan.yml@v1
     with:
-      cli-version: "0.2.0"
+      cli-version: "0.2.1"
 ```
 
 This repository is public and its history is reviewable precisely so that trusting a moving tag
