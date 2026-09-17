@@ -1,0 +1,92 @@
+name: attribution
+
+# No AI attribution, and nothing a reader of this public repository cannot follow — in its files, in
+# the commit messages a pull request brings, and in the pull request's own title and description.
+# `scripts/attribution-lint.mjs` says what each rule refuses and why there is no allow marker.
+#
+# `edited` IS WHY THIS IS ITS OWN WORKFLOW: a description changed after the pull request opens is not
+# an event the other checks re-run on, and it is published words all the same.
+#
+# THE TITLE AND BODY ARE PASSED THROUGH env, NEVER INTERPOLATED INTO run:. They are text any
+# contributor controls; interpolated into a shell script they would be command injection. As
+# environment variables they are data.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: attribution-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  files:
+    name: files
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: The check refuses what it must, and nothing it must not
+        run: node --test scripts/attribution-lint.test.mjs
+
+      - name: No AI attribution or unresolvable citations in any file
+        run: node scripts/attribution-lint.mjs
+
+  commits:
+    name: commits
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout with history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The base branch's history, so the commits this pull request brings can be told apart.
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: No AI attribution in the commits this pull request brings
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: node scripts/attribution-lint.mjs --commits "origin/${BASE_REF}"
+
+  pr-text:
+    name: pr-text
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: No AI attribution or private pointers in the title or description
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: printf '%s\n\n%s\n' "$PR_TITLE" "$PR_BODY" | node scripts/attribution-lint.mjs --stdin
