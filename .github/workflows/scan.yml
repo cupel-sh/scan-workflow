@@ -76,6 +76,38 @@ jobs:
         with:
           persist-credentials: false
 
+      # A Python project's dependencies are read from its installed environment (`.venv`), the
+      # way a Node project's are read from `node_modules` — the engine reads what is installed,
+      # never what a manifest merely declares. A checkout has no environment, so one is created
+      # here from the project's own lockfile or requirements, with uv. Nothing runs your
+      # application. A repository without a Python project skips this step entirely, and a
+      # failed install removes the partial environment so the scan reports "no environment"
+      # rather than a partial dependency set.
+      - name: Install uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: false
+
+      - name: Install the Python environment
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          set -u
+          if [ -f uv.lock ]; then
+            recipe="uv sync --frozen"
+          elif [ -f requirements.txt ]; then
+            recipe="uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt"
+          elif [ -f pyproject.toml ]; then
+            recipe="uv venv .venv && uv pip install --python .venv/bin/python -r pyproject.toml"
+          else
+            echo "no Python project here (no uv.lock, requirements.txt or pyproject.toml); skipping"
+            exit 0
+          fi
+          echo "installing the Python environment: $recipe"
+          if ! sh -c "$recipe"; then
+            rm -rf .venv
+            echo "::warning::the Python environment could not be installed; the scan will report it as missing rather than read a partial one"
+          fi
+
       - name: Scan and push findings
         working-directory: ${{ inputs.working-directory }}
         env:
