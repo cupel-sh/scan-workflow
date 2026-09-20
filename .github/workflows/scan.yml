@@ -79,10 +79,20 @@ jobs:
       # A Python project's dependencies are read from its installed environment (`.venv`), the
       # way a Node project's are read from `node_modules` — the engine reads what is installed,
       # never what a manifest merely declares. A checkout has no environment, so one is created
-      # here from the project's own lockfile or requirements, with uv. Nothing runs your
-      # application. A repository without a Python project skips this step entirely, and a
-      # failed install removes the partial environment so the scan reports "no environment"
-      # rather than a partial dependency set.
+      # here from the project's own lockfile or requirements, with uv. A repository without a
+      # Python project skips this step entirely, and a failed install removes the partial
+      # environment so the scan reports "no environment" rather than a partial dependency set.
+      #
+      # `--no-build` IS LOAD-BEARING, and it is why this step can exist at all. Installing a
+      # source distribution BUILDS it, which runs `setup.py` or a PEP 517 backend — arbitrary
+      # code from one of your dependencies, in your runner, in a job that holds an id-token.
+      # cupel never executes the code it analyses, and a workflow that built sdists here would
+      # undo that on your side of the wire. `--no-build` means wheels only: nothing a dependency
+      # ships gets executed in order to install it.
+      #
+      # The cost is stated rather than hidden: a dependency that publishes no wheel cannot be
+      # installed, the recipe fails, the partial environment is removed, and the scan reports
+      # "no environment" — which is the honest outcome and never a narrower dependency set.
       - name: Install uv
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
@@ -92,12 +102,22 @@ jobs:
         working-directory: ${{ inputs.working-directory }}
         run: |
           set -u
+          # ORDER MATTERS. A Poetry or PDM project normally ALSO has a `pyproject.toml`, so the
+          # lockfiles this recipe cannot read are checked BEFORE the pyproject fallback — without
+          # that, a Poetry 1.x project falls through to `-r pyproject.toml`, which reads PEP 621
+          # `[project.dependencies]` and finds nothing in `[tool.poetry.dependencies]`.
           if [ -f uv.lock ]; then
-            recipe="uv sync --frozen"
+            recipe="uv sync --frozen --no-build"
+          elif [ -f poetry.lock ] || [ -f pdm.lock ] || [ -f Pipfile.lock ]; then
+            # NAMED, NOT SILENT. cupel treats any of these lockfiles as proof the directory is
+            # a Python project, so the scan calls it one and then finds no installed packages —
+            # a dependency set of zero, which reads exactly like a clean one. Say so instead.
+            echo "::warning::a Poetry / PDM / Pipenv lockfile is present and this workflow installs with uv, which cannot read it. Install the environment yourself in a step before this job (any `.venv` is read), or the Python half of this scan reports no dependencies."
+            exit 0
           elif [ -f requirements.txt ]; then
-            recipe="uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt"
+            recipe="uv venv .venv && uv pip install --python .venv/bin/python --no-build -r requirements.txt"
           elif [ -f pyproject.toml ]; then
-            recipe="uv venv .venv && uv pip install --python .venv/bin/python -r pyproject.toml"
+            recipe="uv venv .venv && uv pip install --python .venv/bin/python --no-build -r pyproject.toml"
           else
             echo "no Python project here (no uv.lock, requirements.txt or pyproject.toml); skipping"
             exit 0
