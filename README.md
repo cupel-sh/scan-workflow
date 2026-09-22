@@ -36,6 +36,23 @@ Findings are pushed with a GitHub-signed OIDC assertion that names your reposito
 is **no long-lived credential to store in your CI**. If your CI is not GitHub Actions, the
 dashboard can issue a project token instead.
 
+### If your organisation restricts which actions may run
+
+GitHub refuses a workflow before any job starts when it uses an action your organisation's
+**Settings → Actions → General → Allow specified actions** list does not name. The run shows as
+**Startup failure**, no scan happens, and the dashboard marks the repository as not recently
+scanned. Allow both of these:
+
+```
+cupel-sh/scan-workflow@*
+astral-sh/setup-uv@*
+```
+
+`astral-sh/setup-uv` installs the Python environment a Python project is scanned against. It is
+pinned by commit in this workflow, so allowing the name does not let a moved tag change what runs.
+The other action it uses, `actions/checkout`, is GitHub's own and is allowed by the
+"Allow actions created by GitHub" option.
+
 ## What it can and cannot do
 
 The permissions in *your* file are a ceiling this workflow cannot raise — GitHub intersects the
