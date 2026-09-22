@@ -36,6 +36,24 @@ Findings are pushed with a GitHub-signed OIDC assertion that names your reposito
 is **no long-lived credential to store in your CI**. If your CI is not GitHub Actions, the
 dashboard can issue a project token instead.
 
+### If your organisation restricts which actions may run
+
+Allow one name:
+
+```
+cupel-sh/scan-workflow@*
+```
+
+That is the whole requirement. This workflow uses no third-party action: the only other action it
+runs is `actions/checkout`, which is GitHub's own and is covered by "Allow actions created by
+GitHub". The Python installer it needs (`uv`) is installed from PyPI, pinned to an exact version
+and its wheel's hash, into a throwaway environment.
+
+An action this list does not name makes GitHub refuse the workflow **before any job starts**: the
+run shows as *Startup failure*, no scan happens, and the dashboard can only report that the
+repository has not been scanned recently. Keeping the list to one name is why the installer is not
+an action.
+
 ## What it can and cannot do
 
 The permissions in *your* file are a ceiling this workflow cannot raise — GitHub intersects the

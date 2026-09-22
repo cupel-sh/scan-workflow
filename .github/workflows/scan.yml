@@ -93,10 +93,37 @@ jobs:
       # The cost is stated rather than hidden: a dependency that publishes no wheel cannot be
       # installed, the recipe fails, the partial environment is removed, and the scan reports
       # "no environment" — which is the honest outcome and never a narrower dependency set.
+      # uv, FROM PyPI AND PINNED BY HASH, RATHER THAN THROUGH A THIRD-PARTY ACTION.
+      # `astral-sh/setup-uv` did this until 2026-09-22. The cost was borne by the customer: an
+      # organisation that restricts which actions may run had to allowlist a second name, and
+      # until it did, every run failed at STARTUP — no job, no scan, no explanation, and a
+      # dashboard that could only say the repository had not been scanned (seen on cupel's own
+      # test repository, 2026-09-18 to 2026-09-22). One allowlist entry, `cupel-sh/scan-workflow`,
+      # is now the whole requirement.
+      #
+      # THE TRUST IS THE SAME AND THE PROOF IS STRONGER. It is the same uv, published by the same
+      # people; what changes is that `--require-hashes` makes pip refuse any bytes but the wheel
+      # named below, where a tag on an action can be moved. `--only-binary` keeps the no-build
+      # posture the step underneath depends on: nothing is compiled, so nothing of uv's own
+      # packaging executes to install it. It goes into a throwaway environment under the runner's
+      # temp directory, so the project's own environment is never touched.
+      #
+      # Bumping uv means replacing the version AND its hashes together; a hash that does not match
+      # its version fails the install rather than reaching for whatever is on PyPI today.
       - name: Install uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
-        with:
-          enable-cache: false
+        run: |
+          set -eu
+          python3 -m venv "${RUNNER_TEMP}/uv"
+          # Written with printf, not a heredoc: a requirements file is column-sensitive and a
+          # heredoc here would carry this block's indentation into it.
+          printf '%s\n' \
+            'uv==0.12.17 \' \
+            '  --hash=sha256:9e25bb39e1674799c408345a6397ebc2c7c719d498be0ce9d935466d36ceacf5 \' \
+            '  --hash=sha256:e2bc5ec70e395fc5769becd1b81f6cedc66d23ccaf1392743f0f8c9cfe81b18c' \
+            > "${RUNNER_TEMP}/uv-pins.txt"
+          "${RUNNER_TEMP}/uv/bin/python" -m pip install --quiet --disable-pip-version-check \
+            --only-binary=:all: --require-hashes -r "${RUNNER_TEMP}/uv-pins.txt"
+          echo "${RUNNER_TEMP}/uv/bin" >> "${GITHUB_PATH}"
 
       - name: Install the Python environment
         working-directory: ${{ inputs.working-directory }}
