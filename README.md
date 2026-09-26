@@ -94,13 +94,15 @@ is a decision you can audit rather than one you have to take on faith.
 | `cli-version` | the version this workflow ships | Pin `@cupel-sh/cli` explicitly. |
 | `working-directory` | `.` | Scan a project that is not at the repository root. |
 | `entry` | — | The file your application starts from, when cupel cannot work it out. |
+| `exclude` | — | Files to leave out of the source-file count, `.gitignore` syntax, one per line. |
 
 ### When you need `entry`
 
 cupel finds your application by looking for `main`, `bin` or `exports` in `package.json`, an
-`index.js`, a `start` script, or a `Procfile`. A project built by **Astro, Next, SvelteKit, Nuxt
-or Vite declares none of them** — the entry is a convention the framework resolves at build time,
-so there is no file in `package.json` to point at.
+`index.js`, a `start` script, or a `Procfile`. It also finds the module scripts a Vite app's
+`index.html` loads, and the route files of Astro, Next, SvelteKit and Nuxt, `.astro`, `.vue` and
+`.svelte` pages included. You need `entry` when your application starts somewhere none of those
+point.
 
 When cupel finds nothing to start from it says so, loudly, and every finding is
 _potentially reachable_ (`potentially-reachable-not-analysed`):
@@ -129,6 +131,20 @@ One per line if your app has several roots:
 
 Listing a root never narrows the scan: cupel unions what you give it with anything it found on
 its own.
+
+### The source-file count, and `exclude`
+
+Every scan reports how many source files your repository holds per language, how many cupel
+scanned, and what happened to each of the rest. The count follows your `.gitignore` files and
+skips dependency and build directories. To leave out anything else, list patterns in a
+`.cupelignore` file, or pass them here:
+
+```yaml
+    with:
+      exclude: |
+        legacy/
+        **/*.generated.ts
+```
 
 ## Reporting a problem
 
