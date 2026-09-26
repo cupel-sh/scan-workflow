@@ -102,7 +102,8 @@ cupel finds your application by looking for `main`, `bin` or `exports` in `packa
 or Vite declares none of them** — the entry is a convention the framework resolves at build time,
 so there is no file in `package.json` to point at.
 
-When cupel finds nothing to start from it says so, loudly, and caps every verdict at `unknown`:
+When cupel finds nothing to start from it says so, loudly, and every finding is
+_potentially reachable_ (`potentially-reachable-not-analysed`):
 
 ```
 🛑 No entrypoint analyzed — this scan is NOT a clean bill of health.
