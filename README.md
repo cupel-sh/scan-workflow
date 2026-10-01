@@ -44,10 +44,10 @@ Allow one name:
 cupel-sh/scan-workflow@*
 ```
 
-That is the whole requirement. This workflow uses no third-party action: the only other action it
-runs is `actions/checkout`, which is GitHub's own and is covered by "Allow actions created by
-GitHub". The Python installer it needs (`uv`) is installed from PyPI, pinned to an exact version
-and its wheel's hash, into a throwaway environment.
+That is the whole requirement. This workflow uses no third-party action: the only other actions
+it runs are `actions/checkout` and, with Go scanning on, `actions/setup-go`. Both are GitHub's own
+and covered by "Allow actions created by GitHub". The Python installer it needs (`uv`) is installed
+from PyPI, pinned to an exact version and its wheel's hash, into a throwaway environment.
 
 An action this list does not name makes GitHub refuse the workflow **before any job starts**: the
 run shows as *Startup failure*, no scan happens, and the dashboard can only report that the
@@ -95,6 +95,8 @@ is a decision you can audit rather than one you have to take on faith.
 | `working-directory` | `.` | Scan a project that is not at the repository root. |
 | `entry` | — | The file your application starts from, when cupel cannot work it out. |
 | `exclude` | — | Files to leave out of the source-file count, `.gitignore` syntax, one per line. |
+| `x-go` | `false` | Also scan Go modules, at package level. Needs engine 0.14.0 or later. See [Go](#go-x-go). |
+| `go-private` | `github.com/<owner>/*` in a private repository | With `x-go`: Go modules never sent to a proxy or downloaded. See [Go](#go-x-go). |
 
 ### When you need `entry`
 
@@ -145,6 +147,78 @@ skips dependency and build directories. To leave out anything else, list pattern
         legacy/
         **/*.generated.ts
 ```
+
+### Go (`x-go`)
+
+Go scanning is off by default while it is new, and it needs engine **0.14.0 or later**. Turn it on:
+
+```yaml
+    uses: cupel-sh/scan-workflow/.github/workflows/scan.yml@v1
+    with:
+      x-go: true
+```
+
+With `x-go` on, the job does two things before the scan:
+
+1. **The right Go.** It reads every `go.mod` and `go.work` in the tree, each for its `toolchain`
+   line, else its `go` line. When the newest of them is newer than the runner's Go,
+   `actions/setup-go` installs it. The runner's Go is never replaced by an older one: the scan
+   needs Go 1.21 or later, and a newer Go reads an older module fine.
+2. **The modules.** `go mod download` runs in every directory that holds a `go.mod`, except
+   `vendor`, `testdata`, `node_modules` and names beginning with `_` or `.`. It fetches each module
+   from `proxy.golang.org`, checks it against your `go.sum` and the public checksum database, and
+   runs none of its code. A module with a committed `vendor/` is read from there instead, and
+   nothing is fetched for it. When one module cannot be fetched, the others still are. The step
+   can reach `proxy.golang.org`, the storage it redirects large modules to
+   (`storage.googleapis.com`) and `sum.golang.org`, and no other host.
+
+The scan itself fetches nothing. It reads the modules from disk with `go list`.
+
+**Private modules, and `go-private`.** `go mod download` asks the proxy for each module by its
+path, so the path itself reaches `proxy.golang.org`. `go-private` lists the modules that must never
+be sent there: module path patterns, comma-separated, in `GOPRIVATE` syntax. A module it matches is
+never asked of any proxy or of the checksum database, and never downloaded or looked up anywhere
+else. The scan reports it as a module it could not read: a coverage gap, counted as potentially
+reachable, never a clean result.
+
+- **Unset, in a private or internal repository**, it is your own organisation's,
+  `github.com/<owner>/*`, in the owner's spelling and in lower case. Module paths are
+  case-sensitive, so list any other spelling yourself.
+- **Unset, in a public repository**, it is none: every module path your `go.mod` and `go.sum`
+  name is public already, so nothing is withheld and your organisation's own public modules are
+  read. A run whose repository visibility cannot be told is treated as private.
+- **Every module outside the patterns is sent to the public proxy.** Private modules hosted
+  elsewhere (`go.example.com/...`, another organisation) need their own patterns:
+
+  ```yaml
+      with:
+        x-go: true
+        go-private: github.com/acme/*,go.acme.dev/*
+  ```
+
+- **`none`** sends every module to the public proxy. Use it in a private repository when your
+  organisation's modules are public and you want them scanned.
+
+This workflow holds none of your credentials, so a private module is never read here. To have
+it read, commit `vendor/` (`go mod vendor`), or run cupel in a job of your own after your own
+`go mod download`.
+
+**What it needs from your repository:** `go` lines that name a released Go (the job installs the
+newest one asked for), and modules the public proxy serves or a committed `vendor/`.
+
+**What a Go result says:**
+
+- **Package level only:** whether a vulnerable package is in your build at all. cupel does not
+  follow calls in Go code yet, so no Go finding reads reachable, and a vulnerable package in your
+  build reads potentially reachable, not analysed.
+- **One build configuration:** the runner's (Linux, amd64) and the default build tags. A package
+  only another configuration imports is never ruled out. Tests and tools are outside the build.
+- **The standard library is judged against your `go` line,** the oldest Go that may build your
+  program, not the Go that ran the scan. Raising the `go` line past a fix settles such a finding.
+
+With a `cli-version` older than 0.14.0, or one that is not an exact version, `x-go` fails the run
+before anything is scanned. Older engines can call a Go dependency clean when it is not, and a
+failed run is the honest outcome.
 
 ## Reporting a problem
 
