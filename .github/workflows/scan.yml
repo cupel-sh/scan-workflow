@@ -63,6 +63,28 @@ on:
           what the analysis follows.
         required: false
         type: string
+      x-go:
+        description: >-
+          Also scan Go modules, at package level. Off by default while Go support is new, and it
+          needs engine 0.14.0 or later: with an older `cli-version` the run fails before anything
+          is scanned. The job first makes sure a Go at least as new as any go.mod in the tree asks
+          for is on the runner, then downloads the modules (`go mod download`, which fetches and
+          verifies them and runs none of their code), because the engine reads them from disk and
+          fetches nothing itself.
+        required: false
+        type: boolean
+        default: false
+      go-private:
+        description: >-
+          With `x-go`: the Go modules that must never be sent to a proxy or downloaded, as
+          comma-separated module path patterns (GOPRIVATE syntax). The scan names each one it
+          could not read. Unset, it is your own organisation's, `github.com/<owner>/*`, in a
+          private or internal repository, and none in a public one, whose module paths are
+          public already; `none` lets every module go to the public proxy. Any module outside the
+          patterns is fetched from proxy.golang.org, which sees its path.
+        required: false
+        type: string
+        default: ""
 
 # Narrowed here as well as by the caller. The intersection means this cannot grant anything,
 # but stating it means a repository that grants broadly still runs this job with only what it
@@ -164,6 +186,194 @@ jobs:
             echo "::warning::the Python environment could not be installed; the scan will report it as missing rather than read a partial one"
           fi
 
+      # GO, ONLY WHEN ASKED (`x-go`). The engine reads a Go project the way the go command builds
+      # it: `go list`, with the Go on the runner and the module cache, fetching nothing. A checkout
+      # alone gives it too little. The runner's module cache is empty, so every third-party module
+      # would be missing from the scan (named as a gap, never passed off as clean), and a go.mod
+      # whose `go` line is newer than the runner's Go cannot be read at all. These three steps
+      # close both, and a caller who leaves `x-go` off runs none of them.
+      #
+      # GO-PRIVATE FIRST. A module path can itself be confidential, and `go mod download` asks the
+      # proxy for every module by path, so the modules it matches are kept off the proxy and are
+      # never downloaded; the scan names them as modules it could not read. Unset, in a private
+      # or internal repository it is the calling repository's own organisation, in the owner's
+      # spelling and in lower case (Go module paths are case-sensitive): an organisation's own
+      # module paths are the ones most likely to be private, and a path sent to a public proxy
+      # cannot be taken back. Unset in a PUBLIC repository it is none: every module path its
+      # go.mod and go.sum name is public already, so there is nothing to withhold, and the
+      # organisation's own public modules are read. A repository whose visibility this run cannot
+      # tell is treated as private. `none` turns it off. An input that is not a list of module
+      # path patterns fails the job here, before anything is fetched.
+      #
+      # THEN THE NEWEST GO ANY MODULE ASKS FOR, and the runner's Go is only ever replaced by a
+      # newer one. Every go.mod and go.work in the tree is read (not those under the directories
+      # the go command skips), each for what setup-go would read, its `toolchain` line, else its
+      # `go` line. setup-go would install that even when it is OLDER than the runner's own: a
+      # `go 1.16` module would get Go 1.16, which the engine refuses (it needs 1.21 or later),
+      # although the runner's Go reads that module fine. GOTOOLCHAIN=local, so that asking the
+      # runner's version can never download a toolchain.
+      - name: Plan the Go steps
+        id: go
+        if: inputs.x-go
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          CUPEL_GO_PRIVATE: ${{ inputs.go-private }}
+          CUPEL_REPO_PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          set -u
+          private="$(printf '%s' "$CUPEL_GO_PRIVATE" | sed 's/,,*/,/g; s/^,//; s/,$//')"
+          if [ "$private" = none ]; then
+            private=""
+          elif [ -z "$private" ] && [ "${CUPEL_REPO_PRIVATE:-}" = false ]; then
+            echo "go-private is unset and this repository is public: the module paths it names are public already"
+          elif [ -z "$private" ]; then
+            owner="${GITHUB_REPOSITORY_OWNER}"
+            lower="$(printf '%s' "$owner" | tr '[:upper:]' '[:lower:]')"
+            private="github.com/${owner}/*"
+            if [ "$lower" != "$owner" ]; then
+              private="${private},github.com/${lower}/*"
+            fi
+          fi
+          case "$private" in
+            *[!]A-Za-z0-9._~+/*?,[-]*)
+              echo "::error::go-private takes module path patterns separated by commas, as GOPRIVATE does (letters, digits, . _ ~ + / - and the glob characters * ? [ ]). Nothing was downloaded."
+              exit 1
+              ;;
+          esac
+          echo "private=${private}" >> "${GITHUB_OUTPUT}"
+          if [ -n "$private" ]; then
+            echo "go-private: ${private} is never sent to a proxy or downloaded"
+          else
+            echo "go-private: none; every module may be fetched from the public proxy"
+          fi
+
+          if ! find . \( -type d \( -name node_modules -o -name vendor -o -name testdata -o -name '_*' -o -name '.?*' \) \) -prune \
+              -o -type f \( -name go.mod -o -name go.work \) -print > "${RUNNER_TEMP}/cupel-go-files"; then
+            echo "::warning::part of the tree could not be searched for go.mod files"
+          fi
+          wants=""
+          while IFS= read -r f; do
+            v="$(sed -n 's/^toolchain[[:space:]]\{1,\}go\([0-9][0-9A-Za-z.]*\).*/\1/p' "$f" | head -n 1)"
+            if [ -z "$v" ]; then
+              v="$(sed -n 's/^go[[:space:]]\{1,\}\([0-9][0-9A-Za-z.]*\).*/\1/p' "$f" | head -n 1)"
+            fi
+            if [ -n "$v" ]; then
+              echo "${f}: Go ${v}"
+              wants="$(printf '%s\n%s\n' "$wants" "$v" | sort -V | tail -n 1)"
+            fi
+          done < "${RUNNER_TEMP}/cupel-go-files"
+          has="$(GOTOOLCHAIN=local go env GOVERSION 2>/dev/null | sed 's/^go//')"
+          newest="$(printf '%s\n%s\n' "$has" "$wants" | sort -V | tail -n 1)"
+          if [ -n "$wants" ] && [ "$newest" != "$has" ]; then
+            echo "the newest Go asked for is ${wants} and the runner has ${has:-none}: setting up ${wants}"
+            echo "version=${wants}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "the newest Go asked for is ${wants:-(none)} and the runner has ${has}: using the runner's"
+          fi
+
+      # Pinned by commit SHA, like checkout, and GitHub's own, so an organisation that allows only
+      # GitHub's actions and this workflow needs no new entry. `cache: false`: every module is
+      # downloaded and checked in THIS run, and a cache restored from an earlier run would be
+      # bytes this run never verified. If it fails (a `go` line naming no release, a download
+      # that does not arrive), the scan still runs with the runner's Go and names what that Go
+      # could not read, rather than the whole job failing with no scan.
+      - name: Set up Go
+        if: steps.go.outputs.version != ''
+        continue-on-error: true
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ steps.go.outputs.version }}
+          cache: false
+
+      # `go mod download` FETCHES AND VERIFIES; IT RUNS NOTHING. A module is a zip checked against
+      # go.sum and the public checksum database, and no dependency code executes: the property
+      # the Python step keeps with `--no-build`. It runs in every directory holding a go.mod
+      # except those the go command itself skips (`vendor`, `testdata`, names beginning `_` or
+      # `.`) and `node_modules`, so a repository of several modules has every one read. A module
+      # with a vendor/modules.txt is built from vendor/, so nothing is fetched for it.
+      #
+      # FROM THE PUBLIC PROXY, AND NOTHING ELSE. The step can reach three hosts: proxy.golang.org,
+      # the storage it redirects a large module to (storage.googleapis.com; genproto and the
+      # Google API modules go that way), and sum.golang.org. Every other connection is sent to a
+      # proxy that is not there (127.0.0.1:9) and fails on the spot, and there is no
+      # version-control fallback (GOVCS=*:off), so no git runs against a host a dependency names.
+      # A module go-private matches is GOPRIVATE, GONOPROXY and GONOSUMDB here: never asked of the
+      # proxy or of the checksum database, and, with every other host closed, never fetched from
+      # anywhere, not even looked up on its own domain. Nor can any other private module be
+      # fetched: this workflow holds none of your credentials. The scan names each as missing
+      # rather than reading around it. GOTOOLCHAIN=local: a module whose `go` line is newer than
+      # the Go chosen above fails here, visibly, instead of fetching a toolchain, and the scan
+      # names that root.
+      #
+      # ONE MODULE THAT CANNOT BE FETCHED MUST NOT COST ALL THE OTHERS. A plain `go mod download`
+      # reads the whole module graph first and stops at the first module it cannot resolve, before
+      # it has fetched a single module, so one private dependency would leave every public one
+      # missing too. When it fails, the build list is read as the go command reads it (`go list -m
+      # -e all`) and every module it could resolve is fetched by name; what it could not resolve,
+      # or a local `replace` provides, is left out.
+      #
+      # A failure warns and the scan goes on, as the Python step's does: the engine reports what
+      # it could not read, so a failed download is a named gap, never a narrower clean result. One
+      # retry, because the proxy's transient errors are real (a stream reset has been seen part
+      # way through a large repository) and a second attempt fetches only what the first did not.
+      # A download that runs long is cut at ten minutes and the scan still runs, on what arrived:
+      # the job's twenty minutes are the scan's too, and a scan with named gaps is worth more than
+      # a job killed with no scan at all.
+      - name: Download the Go modules
+        if: inputs.x-go
+        timeout-minutes: 10
+        continue-on-error: true
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          GOTOOLCHAIN: local
+          GOPROXY: https://proxy.golang.org
+          GOVCS: "*:off"
+          GIT_TERMINAL_PROMPT: "0"
+          HTTPS_PROXY: http://127.0.0.1:9
+          HTTP_PROXY: http://127.0.0.1:9
+          NO_PROXY: proxy.golang.org,storage.googleapis.com,sum.golang.org
+          GOPRIVATE: ${{ steps.go.outputs.private }}
+          GONOPROXY: ${{ steps.go.outputs.private }}
+          GONOSUMDB: ${{ steps.go.outputs.private }}
+        run: |
+          set -u
+          if ! command -v go >/dev/null 2>&1; then
+            echo "::warning::no Go on the runner; the scan reports every Go project as not read"
+            exit 0
+          fi
+          if ! find . \( -type d \( -name node_modules -o -name vendor -o -name testdata -o -name '_*' -o -name '.?*' \) \) -prune \
+              -o -type f -name go.mod -print > "${RUNNER_TEMP}/cupel-go-modules"; then
+            echo "::warning::part of the tree could not be searched for go.mod files; a module there is not downloaded"
+          fi
+          if [ ! -s "${RUNNER_TEMP}/cupel-go-modules" ]; then
+            echo "no go.mod here; nothing to download"
+            exit 0
+          fi
+          go version || true
+          # The build list, less the main module, what could not be resolved, and local replacements.
+          fetchable='{{if not .Main}}{{with .Replace}}{{if and .Version (not .Error)}}{{.Path}}@{{.Version}}{{end}}{{else}}{{if not .Error}}{{.Path}}@{{.Version}}{{end}}{{end}}{{end}}'
+          while IFS= read -r mod; do
+            dir="$(dirname "$mod")"
+            if [ -f "${dir}/vendor/modules.txt" ]; then
+              echo "${dir}: vendored, read from vendor/"
+              continue
+            fi
+            echo "${dir}: go mod download"
+            if (cd "$dir" && go mod download) || (cd "$dir" && go mod download); then
+              continue
+            fi
+            echo "${dir}: some modules cannot be fetched; fetching the others by name"
+            if (cd "$dir" && go list -m -e -f "$fetchable" all) > "${RUNNER_TEMP}/cupel-go-all"; then
+              sed '/^$/d' "${RUNNER_TEMP}/cupel-go-all" > "${RUNNER_TEMP}/cupel-go-fetchable"
+              if [ ! -s "${RUNNER_TEMP}/cupel-go-fetchable" ] \
+                || (cd "$dir" && xargs go mod download < "${RUNNER_TEMP}/cupel-go-fetchable"); then
+                echo "::warning::${dir}: some modules could not be fetched (a go-private module never is) and the rest were; the scan names the missing ones"
+                continue
+              fi
+            fi
+            echo "::warning::go mod download could not fetch everything in ${dir}; the scan names what it could not read there"
+          done < "${RUNNER_TEMP}/cupel-go-modules"
+
       - name: Scan and push findings
         working-directory: ${{ inputs.working-directory }}
         env:
@@ -176,6 +386,13 @@ jobs:
           # repository, executed with your job's permissions. Read as a variable it is data.
           CUPEL_ENTRY: ${{ inputs.entry }}
           CUPEL_EXCLUDE: ${{ inputs.exclude }}
+          CUPEL_X_GO: ${{ inputs.x-go }}
+          # The same go-private patterns, so every go command this job runs is told the same
+          # thing. The engine fetches nothing whatever they say: it runs the go command with
+          # GOPROXY=off and replaces GONOPROXY with a pattern that matches nothing.
+          GOPRIVATE: ${{ steps.go.outputs.private }}
+          GONOPROXY: ${{ steps.go.outputs.private }}
+          GONOSUMDB: ${{ steps.go.outputs.private }}
         run: |
           set -- scan
           # One entry per line, empty lines skipped. `--entry` is repeatable and the engine
@@ -189,5 +406,20 @@ jobs:
           while IFS= read -r line; do
             [ -n "$line" ] && set -- "$@" --exclude "$line"
           done <<< "$CUPEL_EXCLUDE"
+          # GO FROM ENGINE 0.14.0 ONLY, the first that judges the standard library by the oldest Go
+          # your go.mod allows and names every module it could not read. An older engine can call
+          # a Go dependency clean when it is not, so `x-go` with an older `cli-version` stops here,
+          # before anything is scanned: a failed run is honest, and a result that looks complete
+          # and is not is the one outcome this must never produce. A range or a tag cannot be
+          # checked, so it is refused the same way; name an exact version.
+          if [ "$CUPEL_X_GO" = "true" ]; then
+            if ! printf '%s\n' "$CUPEL_CLI_VERSION" | awk -F. '
+                /^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$/ { ok = ($1 > 0 || $2 >= 14) }
+                END { exit (ok ? 0 : 1) }'; then
+              echo "::error::x-go needs @cupel-sh/cli 0.14.0 or later, as an exact version, and this run was given '${CUPEL_CLI_VERSION}'. Remove the cli-version pin or raise it, or turn x-go off."
+              exit 1
+            fi
+            set -- "$@" --x-go
+          fi
           set -- "$@" --push
           npx --yes "@cupel-sh/cli@${CUPEL_CLI_VERSION}" "$@"
