@@ -65,15 +65,16 @@ on:
         type: string
       x-go:
         description: >-
-          Also scan Go modules, at package level. Off by default while Go support is new, and it
-          needs engine 0.14.0 or later: with an older `cli-version` the run fails before anything
-          is scanned. The job first makes sure a Go at least as new as any go.mod in the tree asks
-          for is on the runner, then downloads the modules (`go mod download`, which fetches and
-          verifies them and runs none of their code), because the engine reads them from disk and
-          fetches nothing itself.
+          Scan Go modules, at package level: on by default from engine 0.15.0, where a Go
+          advisory whose reviewed packages no build compiles reads not-reachable. It needs engine
+          0.14.0 or later: with an older `cli-version` the run fails before anything is scanned.
+          The job first makes sure a Go at least as new as any go.mod in the tree asks for is on
+          the runner, then downloads the modules (`go mod download`, which fetches and verifies
+          them and runs none of their code), because the engine reads them from disk and fetches
+          nothing itself. Set it to false to keep the scan before Go (`--no-go`).
         required: false
         type: boolean
-        default: false
+        default: true
       go-private:
         description: >-
           With `x-go`: the Go modules that must never be sent to a proxy or downloaded, as
@@ -380,7 +381,7 @@ jobs:
           # The default is the version this workflow ships, and bumping it here is the whole of
           # an engine upgrade for everyone on the moving tag. The input overrides it, so
           # pinning costs you nothing but a line.
-          CUPEL_CLI_VERSION: ${{ inputs.cli-version || '0.14.0' }}
+          CUPEL_CLI_VERSION: ${{ inputs.cli-version || '0.15.0' }}
           # THROUGH THE ENVIRONMENT, NOT INTO THE SCRIPT. `${{ }}` substitutes before bash sees
           # the line, so an input interpolated directly into `run:` is a shell injection in your
           # repository, executed with your job's permissions. Read as a variable it is data.
@@ -420,6 +421,20 @@ jobs:
               exit 1
             fi
             set -- "$@" --x-go
+          else
+            # x-go OFF, EXPLICITLY. From engine 0.15.0 the Go scan is the engine's default, so
+            # passing nothing would scan Go with no modules on disk. `--no-go` keeps the scan
+            # before Go. 0.14.0 already knows it; an exact pin below 0.14.0 scans no Go anyway and
+            # does not know the flag, so it is given nothing. A range or a tag gets `--no-go`:
+            # one that resolves below 0.14.0 fails on the flag, which is honest, never a silent
+            # Go scan.
+            if printf '%s\n' "$CUPEL_CLI_VERSION" | awk -F. '
+                /^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$/ { exact = 1; old = ($1 == 0 && $2 < 14) }
+                END { exit ((exact && old) ? 0 : 1) }'; then
+              :
+            else
+              set -- "$@" --no-go
+            fi
           fi
           set -- "$@" --push
           npx --yes "@cupel-sh/cli@${CUPEL_CLI_VERSION}" "$@"
