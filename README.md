@@ -95,7 +95,7 @@ is a decision you can audit rather than one you have to take on faith.
 | `working-directory` | `.` | Scan a project that is not at the repository root. |
 | `entry` | — | The file your application starts from, when cupel cannot work it out. |
 | `exclude` | — | Files to leave out of the source-file count, `.gitignore` syntax, one per line. |
-| `x-go` | `false` | Also scan Go modules, at package level. Needs engine 0.14.0 or later. See [Go](#go-x-go). |
+| `x-go` | `true` | Scan Go modules, at package level; `false` keeps the scan before Go. Needs engine 0.14.0 or later. See [Go](#go-x-go). |
 | `go-private` | `github.com/<owner>/*` in a private repository | With `x-go`: Go modules never sent to a proxy or downloaded. See [Go](#go-x-go). |
 
 ### When you need `entry`
@@ -150,12 +150,14 @@ skips dependency and build directories. To leave out anything else, list pattern
 
 ### Go (`x-go`)
 
-Go scanning is off by default while it is new, and it needs engine **0.14.0 or later**. Turn it on:
+Go scanning is **on by default** from engine 0.15.0, and it needs engine **0.14.0 or later**. A Go
+advisory reads **not-reachable** when its reviewed vulnerable packages are compiled by no build of
+your program. To keep the scan before Go, turn it off:
 
 ```yaml
     uses: cupel-sh/scan-workflow/.github/workflows/scan.yml@v1
     with:
-      x-go: true
+      x-go: false
 ```
 
 With `x-go` on, the job does two things before the scan:
@@ -209,15 +211,18 @@ newest one asked for), and modules the public proxy serves or a committed `vendo
 **What a Go result says:**
 
 - **Package level only:** whether a vulnerable package is in your build at all. cupel does not
-  follow calls in Go code yet, so no Go finding reads reachable, and a vulnerable package in your
-  build reads potentially reachable, not analysed.
+  follow calls in Go code yet, so no Go finding reads reachable. A vulnerable package in your build
+  reads potentially reachable, not analysed. An advisory whose reviewed packages no build compiles
+  reads not-reachable. That needs a verified record of the vulnerable code, the module on disk, and
+  no `replace` of it.
 - **One build configuration:** the runner's (Linux, amd64) and the default build tags. A package
   only another configuration imports is never ruled out. Tests and tools are outside the build.
 - **The standard library is judged against your `go` line,** the oldest Go that may build your
   program, not the Go that ran the scan. Raising the `go` line past a fix settles such a finding.
 
 With a `cli-version` older than 0.14.0, or one that is not an exact version, `x-go` fails the run
-before anything is scanned. Older engines can call a Go dependency clean when it is not, and a
+before anything is scanned. With `x-go: false` the scan is given `--no-go`, except under an exact
+`cli-version` below 0.14.0, which scans no Go anyway. Older engines can call a Go dependency clean when it is not, and a
 failed run is the honest outcome.
 
 ## Reporting a problem
