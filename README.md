@@ -98,6 +98,21 @@ is a decision you can audit rather than one you have to take on faith.
 | `x-go` | `true` | Scan Go modules, at package level; `false` keeps the scan before Go. Needs engine 0.14.0 or later. See [Go](#go-x-go). |
 | `go-private` | `github.com/<owner>/*` in a private repository | With `x-go`: Go modules never sent to a proxy or downloaded. See [Go](#go-x-go). |
 
+### Scan after your build
+
+If your `package.json` entries (`main`, `bin`, `exports`, `scripts.start`) name files a build
+produces (`dist/`, `build/`, `lib/`), run the build before the scan in the same job, so cupel reads
+the tree your application runs:
+
+```yaml
+    - run: npm ci && npm run build
+    - uses: cupel-sh/scan-workflow/.github/workflows/scan.yml@v1
+```
+
+An entry that names a file the scan cannot find is reported as a gap, and every `not-reachable` is
+withheld while a gap stands. Where a `tsconfig.json` declares `outDir` and `rootDir`, cupel reads the
+declared output's source in its place; a bundler's output has no such declaration, so build first.
+
 ### When you need `entry`
 
 cupel finds your application by looking for `main`, `bin` or `exports` in `package.json`, an
