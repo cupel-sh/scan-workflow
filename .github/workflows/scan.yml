@@ -86,6 +86,33 @@ on:
         required: false
         type: string
         default: ""
+      run:
+        description: >-
+          Your test or start command, for runtime evidence. Leave it unset and nothing below runs:
+          the workflow is the one it was. Set, it runs in a job of its own, BEFORE the scan and
+          apart from it, with cupel's two preloads observing which installed packages your
+          application loads. The scan then reads what the run recorded beside its static verdicts.
+          THIS RUNS YOUR CODE AND YOUR DEPENDENCIES' CODE: the job that runs it has `contents: read`
+          and nothing else, no id-token and none of your secrets, and the scan never runs in it.
+          Give it the command your CI already runs, such as `npm test`. Install first with
+          `run-setup`.
+        required: false
+        type: string
+        default: ""
+      run-setup:
+        description: >-
+          With `run`: what to run before it, not observed, such as `npm ci`. It runs in the same job
+          as `run`, with the same permissions, so it is your code and your dependencies' code too.
+        required: false
+        type: string
+        default: ""
+      run-timeout-minutes:
+        description: >-
+          With `run`: how long the command may run before it is stopped. A run that is stopped is
+          recorded as timed out, and the scan then says nothing about what it did not see load.
+        required: false
+        type: number
+        default: 15
 
 # Narrowed here as well as by the caller. The intersection means this cannot grant anything,
 # but stating it means a repository that grants broadly still runs this job with only what it
@@ -94,9 +121,158 @@ permissions:
   contents: read
   id-token: write
 
+# The engine version, once for both jobs. The default is the version this workflow ships, and
+# bumping it here is the whole of an engine upgrade for everyone on the moving tag. The input
+# overrides it, so pinning costs you nothing but a line.
+env:
+  CUPEL_CLI_VERSION: ${{ inputs.cli-version || '0.15.0' }}
+
 jobs:
+  # RUNTIME EVIDENCE, ONLY WHEN ASKED (`run`). This job runs your command, and your command runs
+  # your dependencies' code. So it is a job of its own, on a runner of its own, and the scan never
+  # runs here.
+  #
+  # NO ID-TOKEN, BY DESIGN. Every step of a job that holds `id-token: write` can ask GitHub for a
+  # signed assertion naming your repository, with any audience. If your cloud trusts that
+  # assertion, code that can ask for one can act as your repository there. A dependency your tests
+  # load would be such code. This job holds `contents: read` and nothing else, so nothing it runs
+  # can ask.
+  #
+  # AND NOT THE SCAN'S RUNNER. Code that runs before the scan on the same machine can change what
+  # the scan runs: the npm cache it installs the engine from, the PATH, the files it reads. A
+  # result pushed from there would be a result that code chose. The scan job starts on a clean
+  # runner and runs none of your code.
+  #
+  # WHAT CROSSES: one JSON file. The scan job downloads it by the id this job's upload returns,
+  # checked against the digest GitHub recorded, into the runner's temp directory, outside the
+  # checkout, where the engine requires it to be. The engine treats it as hostile: a closed schema,
+  # bounded sizes, and a reading that never moves a verdict toward safe. It can withdraw a static not-reachable,
+  # add a reachable path the static analysis then finds itself, or say a package was not seen
+  # loading. It can never make a finding look safer than the scan without it.
+  record:
+    name: record
+    if: inputs.run != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Recording needs engine 0.16.0 or later, as an exact version. An older engine has no
+      # recorder; a range or a tag cannot be checked. Stopping here is honest: the scan job still
+      # runs, without evidence, and says that none arrived.
+      - name: Check the engine can record
+        run: |
+          if ! printf '%s\n' "$CUPEL_CLI_VERSION" | awk -F. '
+              /^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$/ { ok = ($1 > 0 || $2 >= 16) }
+              END { exit (ok ? 0 : 1) }'; then
+            echo "::error::run needs @cupel-sh/cli 0.16.0 or later, as an exact version, and this run was given '${CUPEL_CLI_VERSION}'. The scan runs without runtime evidence."
+            exit 1
+          fi
+
+      # Your setup, unobserved. Through the environment, never interpolated into the script: an
+      # input pasted into `run:` is a shell injection; read as a variable it is data, run as the
+      # command you wrote.
+      - name: Your setup
+        if: inputs.run-setup != ''
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          CUPEL_RUN_SETUP: ${{ inputs.run-setup }}
+        run: bash -c "$CUPEL_RUN_SETUP"
+
+      # The recorder prints KEY=value lines (the preloads in NODE_OPTIONS, where coverage and load
+      # attribution are written, and the preloads' digest). They are read line by line, four known
+      # keys and nothing else, never evaluated by a shell. The command then runs under them, and is
+      # stopped at `run-timeout-minutes` with SIGTERM, which the preloads answer by writing what they
+      # saw. Its exit code is recorded, and a failing command is not a failed job: a run whose tests
+      # fail still loaded what it loaded. The projector reads the two directories into one file and
+      # runs nothing; it runs without the preloads, so it does not observe itself.
+      - name: Your command, recorded
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          CUPEL_RUN: ${{ inputs.run }}
+          CUPEL_RUN_TIMEOUT: ${{ inputs.run-timeout-minutes }}
+        run: |
+          set -u
+          case "$CUPEL_RUN_TIMEOUT" in
+            ''|*[!0-9]*) echo "::error::run-timeout-minutes must be a whole number of minutes"; exit 1 ;;
+          esac
+          if [ "$CUPEL_RUN_TIMEOUT" -lt 1 ] || [ "$CUPEL_RUN_TIMEOUT" -gt 55 ]; then
+            echo "::error::run-timeout-minutes must be between 1 and 55 (the job stops at 60)"
+            exit 1
+          fi
+          out="${RUNNER_TEMP}/cupel-record"
+          mkdir -p "$out/evidence"
+          if ! npx --yes "@cupel-sh/cli@${CUPEL_CLI_VERSION}" runtime-evidence preload \
+              --out "$out/preload" > "$out/preload.env"; then
+            echo "::error::the recorder could not be set up; nothing was run"
+            exit 1
+          fi
+          while IFS= read -r line; do
+            key="${line%%=*}"
+            value="${line#*=}"
+            case "$key" in
+              NODE_OPTIONS) export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }$value" ;;
+              NODE_V8_COVERAGE|CUPEL_RUNTIME_EVIDENCE_ATTR_DIR|CUPEL_PRELOAD_SHA256) export "$key=$value" ;;
+              '') ;;
+              *) echo "::error::the recorder printed a line this workflow does not read; nothing was run"; exit 1 ;;
+            esac
+          done < "$out/preload.env"
+          coverage="$NODE_V8_COVERAGE"
+          attr="$CUPEL_RUNTIME_EVIDENCE_ATTR_DIR"
+
+          started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          t0="$(date +%s)"
+          # `|| code=$?`: the step's shell stops at the first failing command, and the command's
+          # failure is a result to record, not a reason to stop.
+          code=0
+          timeout --signal=TERM --kill-after=30s "${CUPEL_RUN_TIMEOUT}m" bash -c "$CUPEL_RUN" || code=$?
+          wall=$(( $(date +%s) - t0 ))
+          timed=()
+          if [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then
+            timed=(--timed-out)
+            echo "::warning::the command reached run-timeout-minutes (${CUPEL_RUN_TIMEOUT}) and was stopped; the scan will say nothing about what it did not see load"
+          elif [ "$code" -ne 0 ]; then
+            echo "::notice::the command exited ${code}; what it loaded is recorded all the same"
+          fi
+
+          # The command's words, as the engine names the runner from them: split on blanks, no
+          # globbing, at most 64.
+          set -f
+          read -r -a words <<< "$CUPEL_RUN"
+          set +f
+          words=("${words[@]:0:64}")
+          if ! env -u NODE_OPTIONS -u NODE_V8_COVERAGE -u CUPEL_RUNTIME_EVIDENCE_ATTR_DIR \
+              npx --yes "@cupel-sh/cli@${CUPEL_CLI_VERSION}" runtime-evidence project \
+              --root . --coverage "$coverage" --attr "$attr" \
+              --out "$out/evidence/runtime-evidence.json" \
+              --exit-code "$code" --wall-seconds "$wall" --started-at "$started" "${timed[@]}" \
+              --integration cupel-sh/scan-workflow/record --version v1 \
+              -- "${words[@]}"; then
+            echo "::warning::the run could not be projected into evidence; the scan runs without it"
+          fi
+
+      - name: Hand the evidence to the scan
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cupel-runtime-evidence
+          path: ${{ runner.temp }}/cupel-record/evidence/runtime-evidence.json
+          if-no-files-found: warn
+          retention-days: 1
+
+  # `needs` orders it after the record job when there is one; `!cancelled()` runs it whether that
+  # job ran, was skipped (no `run`) or failed (then without evidence, and the scan says none arrived).
   scan:
     name: scan
+    needs: [record]
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -375,19 +551,28 @@ jobs:
             echo "::warning::go mod download could not fetch everything in ${dir}; the scan names what it could not read there"
           done < "${RUNNER_TEMP}/cupel-go-modules"
 
+      # The record job's file, by the id its upload returned and checked against the digest GitHub
+      # recorded for it, into the runner's temp directory: outside the checkout, where the engine
+      # requires an evidence file to be. No `run`, or no file, and this step does nothing.
+      - name: Fetch the runtime evidence
+        if: needs.record.outputs.artifact-id != ''
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.record.outputs.artifact-id }}
+          path: ${{ runner.temp }}/cupel-evidence
+          digest-mismatch: error
+
       - name: Scan and push findings
         working-directory: ${{ inputs.working-directory }}
         env:
-          # The default is the version this workflow ships, and bumping it here is the whole of
-          # an engine upgrade for everyone on the moving tag. The input overrides it, so
-          # pinning costs you nothing but a line.
-          CUPEL_CLI_VERSION: ${{ inputs.cli-version || '0.15.0' }}
           # THROUGH THE ENVIRONMENT, NOT INTO THE SCRIPT. `${{ }}` substitutes before bash sees
           # the line, so an input interpolated directly into `run:` is a shell injection in your
           # repository, executed with your job's permissions. Read as a variable it is data.
           CUPEL_ENTRY: ${{ inputs.entry }}
           CUPEL_EXCLUDE: ${{ inputs.exclude }}
           CUPEL_X_GO: ${{ inputs.x-go }}
+          CUPEL_RUN_SET: ${{ inputs.run != '' }}
           # The same go-private patterns, so every go command this job runs is told the same
           # thing. The engine fetches nothing whatever they say: it runs the go command with
           # GOPROXY=off and replaces GONOPROXY with a pattern that matches nothing.
@@ -435,6 +620,14 @@ jobs:
             else
               set -- "$@" --no-go
             fi
+          fi
+          # Runtime evidence, when the record job handed a file over. Asked for and absent is said
+          # out loud: the scan below is the static one, and the run log should say why.
+          evidence="${RUNNER_TEMP}/cupel-evidence/runtime-evidence.json"
+          if [ -f "$evidence" ]; then
+            set -- "$@" --runtime-evidence "$evidence"
+          elif [ "$CUPEL_RUN_SET" = "true" ]; then
+            echo "::warning::run was set but no runtime evidence arrived from the record job; this scan is the static one"
           fi
           set -- "$@" --push
           npx --yes "@cupel-sh/cli@${CUPEL_CLI_VERSION}" "$@"

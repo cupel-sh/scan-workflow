@@ -45,8 +45,9 @@ cupel-sh/scan-workflow@*
 ```
 
 That is the whole requirement. This workflow uses no third-party action: the only other actions
-it runs are `actions/checkout` and, with Go scanning on, `actions/setup-go`. Both are GitHub's own
-and covered by "Allow actions created by GitHub". The Python installer it needs (`uv`) is installed
+it runs are `actions/checkout`, with Go scanning on `actions/setup-go`, and with `run`
+`actions/upload-artifact` and `actions/download-artifact`. All are GitHub's own and covered by
+"Allow actions created by GitHub". The Python installer it needs (`uv`) is installed
 from PyPI, pinned to an exact version and its wheel's hash, into a throwaway environment.
 
 An action this list does not name makes GitHub refuse the workflow **before any job starts**: the
@@ -62,6 +63,11 @@ readable from your own repository without reading this one.
 
 It asks for **no** `contents: write`, **no** `pull-requests: write`, and **no** access to your
 secrets. cupel never writes to your repository.
+
+**It runs none of your code, unless you set `run`.** The scan reads your source; it does not
+execute it, and the only installs it makes run nothing (Python wheels only, Go modules fetched and
+verified). `run` is the one exception, and it is yours to opt into: your command runs in a separate
+job that holds `contents: read` and nothing else. See [Runtime evidence](#runtime-evidence-run).
 
 **Your code never leaves your runner.** The engine builds a call graph locally and posts
 findings — advisory ids, package names and versions, verdicts, and path anchors. Never source,
@@ -97,6 +103,9 @@ is a decision you can audit rather than one you have to take on faith.
 | `exclude` | — | Files to leave out of the source-file count, `.gitignore` syntax, one per line. |
 | `x-go` | `true` | Scan Go modules, at package level; `false` keeps the scan before Go. Needs engine 0.14.0 or later. See [Go](#go-x-go). |
 | `go-private` | `github.com/<owner>/*` in a private repository | With `x-go`: Go modules never sent to a proxy or downloaded. See [Go](#go-x-go). |
+| `run` | — | Your test or start command, run in a job of its own to record what your application loads. Runs your code. Needs engine 0.16.0 or later. See [Runtime evidence](#runtime-evidence-run). |
+| `run-setup` | — | With `run`: what to run first, unobserved, such as `npm ci`. |
+| `run-timeout-minutes` | `15` | With `run`: when to stop the command, from 1 to 55. |
 
 ### Entries that a build produces
 
@@ -234,6 +243,66 @@ With a `cli-version` older than 0.14.0, or one that is not an exact version, `x-
 before anything is scanned. With `x-go: false` the scan is given `--no-go`, except under an exact
 `cli-version` below 0.14.0, which scans no Go anyway. Older engines can call a Go dependency clean when it is not, and a
 failed run is the honest outcome.
+
+### Runtime evidence (`run`)
+
+A static scan cannot always see how your application loads a package: a name built at runtime, a
+plugin directory, a loader it does not model. Give the workflow the command your CI already runs,
+and it records which installed packages your application actually loads, then reads that record
+beside its static verdicts:
+
+```yaml
+    uses: cupel-sh/scan-workflow/.github/workflows/scan.yml@v1
+    with:
+      run-setup: npm ci
+      run: npm test
+```
+
+**This runs your code, and your dependencies' code.** Without `run` the workflow runs none of it,
+and nothing below happens. With `run`, a second job, `record`, does this:
+
+1. It checks out your repository and runs `run-setup` (unobserved), then `run` under two small
+   preloads that note which files and packages load. The command is stopped at
+   `run-timeout-minutes`.
+2. It turns what the preloads wrote into one JSON file and hands it to the scan job.
+
+The scan job then runs as it always has, and reads that file.
+
+**Why two jobs.** The `record` job holds `contents: read` and nothing else: no id-token and none of
+your secrets. A job that holds an id-token lets every step in it ask GitHub for an assertion
+naming your repository, and a dependency your tests load would be such a step. The scan job,
+which does hold the id-token to push findings, starts on a clean runner and runs none of your
+code. Code that ran first on the scan's own machine could change what the scan runs, so it never
+does. One file crosses between them. It is downloaded by its id and checked against the digest
+GitHub recorded for it, and the engine treats it as hostile input.
+
+**What the record can change.** Three things, none of them toward safer:
+
+- A package the static scan called **not reachable**, which the run saw your application load,
+  becomes **potentially reachable**. The run proved the static analysis missed a way in, and the
+  finding says which run saw it.
+- A path the static analysis finds from a file the run executed counts like any other path.
+- Beside a potentially reachable finding, a package the run never loaded is marked "not observed
+  loading", with the run named. That is a note, not a verdict: a run may simply not exercise the
+  code.
+
+No verdict reads safer than the scan without the record.
+
+**What it needs:**
+
+- **Engine 0.16.0 or later**, as an exact version. With an older `cli-version` the `record` job
+  stops at its first step, and the scan runs without evidence and says so.
+- **A command that runs your code with Node:** `npm test`, `node --test`, mocha, or a start command.
+  Under vitest or jest, or a command whose test runner cannot be named, the "not observed loading"
+  note is withheld, because those runners load your code in ways the preloads cannot see.
+  Positive observations still count.
+- **Whatever the command needs, in `run-setup`.** The job starts from a bare checkout, so install
+  your dependencies there. A test suite that needs a database or another service is better run in a
+  job of your own, after your own setup, with a project token from the dashboard.
+
+A failing test run still records what it loaded. A run that is stopped at its time limit records
+that it was stopped, and then nothing is marked "not observed loading". The `record` job's file is
+kept for one day.
 
 ## Reporting a problem
 

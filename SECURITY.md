@@ -17,6 +17,13 @@ GitHub intersects the two.
 
 It asks for no `contents: write`, no `pull-requests: write`, and no access to caller secrets.
 
+With the `run` input set, and only then, a second job, `record`, checks out the caller's repository
+and runs the caller's own command under two preloads that record which packages load. That job
+holds `contents: read` and nothing else: no id-token, no secrets. The scan job, which holds the
+id-token, never runs caller code and starts on its own runner. The one file that crosses between
+them is downloaded by artifact id, checked against its recorded digest, and parsed by the engine as
+hostile input: nothing in it can make a finding's verdict safer than the scan without it.
+
 ## Pins
 
 `actions/checkout` is pinned by **commit SHA**, never by tag: a tag is a pointer its owner can
