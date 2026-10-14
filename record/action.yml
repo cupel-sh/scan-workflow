@@ -1,0 +1,132 @@
+name: cupel record
+description: >-
+  Run your own test or start command under cupel's two preloads, in your own job, and record which
+  installed packages your application loads. Pass the file it writes to cupel-sh/scan-workflow/scan.
+
+# WHERE THIS RUNS: in YOUR job, after YOUR setup, with YOUR permissions. It is the runtime-evidence
+# half the reusable workflow deliberately does not have: that workflow runs none of your code, and
+# this action exists to run some. Your command runs your dependencies' code, so whatever your job
+# can reach, it can reach. See the README's "Runtime evidence, in a job of your own".
+#
+# WHAT IT DOES, and nothing else:
+#   1. writes the engine's two preloads to the runner's temp directory, and reads back the KEY=value
+#      lines the engine prints: four known keys, read line by line, never evaluated by a shell;
+#   2. runs your command under them, stopped with SIGTERM at `timeout-minutes` (the preloads answer
+#      it by writing what they saw);
+#   3. projects what they wrote into one file under the runner's temp directory, OUTSIDE your
+#      checkout, where the scan requires it to be. The projector launches nothing, and runs without
+#      the preloads so it does not observe itself;
+#   4. exits with your command's own exit code, so your CI's result is your command's.
+
+inputs:
+  run:
+    description: >-
+      Your test or start command, as your CI already runs it, such as `npm test`. It runs with bash
+      in `working-directory`. Install what it needs in a step before this one.
+    required: true
+  working-directory:
+    description: Directory to run the command in, and the project root the record is read against.
+    required: false
+    default: "."
+  timeout-minutes:
+    description: >-
+      How long the command may run before it is stopped. A stopped run is recorded as timed out, and
+      the scan then says nothing about what it did not see load.
+    required: false
+    default: "15"
+  cli-version:
+    description: >-
+      Pin a specific @cupel-sh/cli version instead of the one this action ships. Recording needs
+      0.16.0 or later, as an exact version.
+    required: false
+    default: ""
+
+outputs:
+  evidence:
+    description: >-
+      The path of the recorded file, for the scan action's `evidence` input. Empty when nothing was
+      recorded.
+    value: ${{ steps.record.outputs.evidence }}
+
+runs:
+  using: composite
+  steps:
+    # Every input reaches the script through the environment, never pasted into it: `${{ }}` in a
+    # `run:` is substituted before bash reads the line, so an input there is a shell injection. As a
+    # variable it is data, and the command runs as the words you wrote.
+    - name: Record
+      id: record
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        CUPEL_CLI_VERSION: ${{ inputs.cli-version || '0.16.0' }}
+        CUPEL_RUN: ${{ inputs.run }}
+        CUPEL_RUN_TIMEOUT: ${{ inputs.timeout-minutes }}
+      run: |
+        set -u
+        if ! printf '%s\n' "$CUPEL_CLI_VERSION" | awk -F. '
+            /^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$/ { ok = ($1 > 0 || $2 >= 16) }
+            END { exit (ok ? 0 : 1) }'; then
+          echo "::error::recording needs @cupel-sh/cli 0.16.0 or later, as an exact version, and this step was given '${CUPEL_CLI_VERSION}'"
+          exit 1
+        fi
+        case "$CUPEL_RUN_TIMEOUT" in
+          ''|*[!0-9]*) echo "::error::timeout-minutes must be a whole number of minutes"; exit 1 ;;
+        esac
+        if [ "$CUPEL_RUN_TIMEOUT" -lt 1 ] || [ "$CUPEL_RUN_TIMEOUT" -gt 360 ]; then
+          echo "::error::timeout-minutes must be between 1 and 360"
+          exit 1
+        fi
+
+        out="${RUNNER_TEMP}/cupel-record"
+        rm -rf "$out"
+        mkdir -p "$out/evidence"
+        if ! npx --yes "@cupel-sh/cli@${CUPEL_CLI_VERSION}" runtime-evidence preload \
+            --out "$out/preload" > "$out/preload.env"; then
+          echo "::error::the recorder could not be set up; your command was not run"
+          exit 1
+        fi
+        while IFS= read -r line; do
+          key="${line%%=*}"
+          value="${line#*=}"
+          case "$key" in
+            NODE_OPTIONS) export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }$value" ;;
+            NODE_V8_COVERAGE|CUPEL_RUNTIME_EVIDENCE_ATTR_DIR|CUPEL_PRELOAD_SHA256) export "$key=$value" ;;
+            '') ;;
+            *) echo "::error::the recorder printed a line this action does not read; your command was not run"; exit 1 ;;
+          esac
+        done < "$out/preload.env"
+        coverage="$NODE_V8_COVERAGE"
+        attr="$CUPEL_RUNTIME_EVIDENCE_ATTR_DIR"
+
+        started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        t0="$(date +%s)"
+        # `|| code=$?`: the step's shell stops at the first failing command, and the command's result
+        # is recorded first and returned last.
+        code=0
+        timeout --signal=TERM --kill-after=30s "${CUPEL_RUN_TIMEOUT}m" bash -c "$CUPEL_RUN" || code=$?
+        wall=$(( $(date +%s) - t0 ))
+        timed=()
+        if [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then
+          timed=(--timed-out)
+          echo "::warning::the command reached timeout-minutes (${CUPEL_RUN_TIMEOUT}) and was stopped; the scan will say nothing about what it did not see load"
+        fi
+
+        # The command's words, as the engine names the runner from them: split on blanks, no
+        # globbing, at most 64.
+        set -f
+        read -r -a words <<< "$CUPEL_RUN"
+        set +f
+        words=("${words[@]:0:64}")
+        if env -u NODE_OPTIONS -u NODE_V8_COVERAGE -u CUPEL_RUNTIME_EVIDENCE_ATTR_DIR \
+            npx --yes "@cupel-sh/cli@${CUPEL_CLI_VERSION}" runtime-evidence project \
+            --root . --coverage "$coverage" --attr "$attr" \
+            --out "$out/evidence/runtime-evidence.json" \
+            --exit-code "$code" --wall-seconds "$wall" --started-at "$started" "${timed[@]}" \
+            --integration cupel-sh/scan-workflow/record --version v1 \
+            -- "${words[@]}"; then
+          echo "evidence=$out/evidence/runtime-evidence.json" >> "$GITHUB_OUTPUT"
+        else
+          echo "::warning::the run could not be projected into evidence; a scan given none runs without it"
+        fi
+        exit "$code"

@@ -235,6 +235,77 @@ before anything is scanned. With `x-go: false` the scan is given `--no-go`, exce
 `cli-version` below 0.14.0, which scans no Go anyway. Older engines can call a Go dependency clean when it is not, and a
 failed run is the honest outcome.
 
+## Runtime evidence, in a job of your own
+
+A static scan cannot always see how your application loads a package: a name built at runtime, a
+plugin directory, a loader it does not model. Two actions record what your application actually
+loads while your own tests run, and the scan reads that record beside its static verdicts. They run
+in **your** job, after **your** setup, so your services, build and toolchain are all there:
+
+```yaml
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: npm ci
+      - id: record
+        uses: cupel-sh/scan-workflow/record@v1
+        with:
+          run: npm test
+      - uses: cupel-sh/scan-workflow/scan@v1
+        if: ${{ !cancelled() }}
+        with:
+          evidence: ${{ steps.record.outputs.evidence }}
+          token: ${{ secrets.CUPEL_TOKEN }}
+```
+
+**`record`** runs your command under two small preloads that note which files and packages load. It
+writes one file under the runner's temp directory, outside your checkout, and returns your command's
+own exit code, so your CI's result is still your tests' result. `if: ${{ !cancelled() }}` on the scan
+step scans even when the tests fail, and a failing run still records what it loaded.
+
+**`scan`** runs the engine in your job, reads that file, and pushes the findings. It takes the same
+`entry`, `exclude`, `x-go` and `cli-version` as the reusable workflow, plus `evidence`, `token` and
+`push`.
+
+**These actions run your code; the reusable workflow does not.** The reusable workflow above runs
+none of your code and keeps doing so. These two are for a job that already runs your code, and that
+comes with two things to know:
+
+- **Pass the credential to the scan step only.** `token` takes a project token from the dashboard
+  and puts it in the scan step's environment and nowhere else. The alternative, `id-token: write` on
+  the job, makes a GitHub-signed assertion naming your repository available to every step of the job,
+  your tests and the dependencies they load included.
+- **The scan shares the runner with what ran before it.** Code your tests ran can change what later
+  steps on the same machine run, as it can for any tool you run after your tests. If you need the scan
+  on a runner none of your code has touched, use the reusable workflow, without runtime evidence.
+
+**What the record can change.** Three things, none of them toward safer:
+
+- A package the static scan called **not reachable**, which the run saw your application load,
+  becomes **potentially reachable**, with the run named.
+- A path the static analysis finds from a file the run executed counts like any other path.
+- Beside a potentially reachable finding, a package the run never loaded is marked "not observed
+  loading". That is a note, not a verdict: a run may simply not exercise the code.
+
+No verdict reads safer than the scan without the record.
+
+**What it needs:**
+
+- **Engine 0.16.0 or later**, as an exact version, for both actions.
+- **A command that runs your code with Node:** `npm test`, `node --test`, mocha, or a start command.
+  Under vitest or jest, or a command whose test runner cannot be named, "not observed loading" is
+  withheld, because those runners load your code in ways the preloads cannot see. Positive
+  observations still count.
+- **If your organisation restricts which actions may run,** the two actions are named
+  `cupel-sh/scan-workflow/record` and `cupel-sh/scan-workflow/scan`, and need allowing as well as the
+  reusable workflow.
+
 ## Reporting a problem
 
 Security issues: see [SECURITY.md](SECURITY.md). Anything else belongs in the product repo.

@@ -17,6 +17,12 @@ GitHub intersects the two.
 
 It asks for no `contents: write`, no `pull-requests: write`, and no access to caller secrets.
 
+`record/action.yml` and `scan/action.yml` are composite actions a caller runs in a job of their own,
+under that job's permissions. `record` runs the caller's own command under two preloads that note
+which packages load, and writes one file outside the checkout; `scan` runs the engine there and reads
+it. Neither asks for a permission. The reusable workflow above never runs caller code; these two
+exist for jobs that already do, and the README says what that means for the caller's credential.
+
 ## Pins
 
 `actions/checkout` is pinned by **commit SHA**, never by tag: a tag is a pointer its owner can
