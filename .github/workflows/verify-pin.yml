@@ -61,43 +61,52 @@ jobs:
           # to compile, with "a workflow file issue" and no line number. Matching on
           # `inputs.cli-version || '...'` is enough to be unambiguous and contains nothing the
           # expression parser claims.
-          pin="$(sed -n "s/.*inputs\.cli-version || '\([^']*\)'.*/\1/p" \
-            .github/workflows/scan.yml)"
+          # EVERY FILE THAT HANDS CALLERS AN ENGINE: the reusable workflow, and the two actions a
+          # caller runs in a job of their own. Each is judged on its own pin, by the same rules.
+          for file in .github/workflows/scan.yml record/action.yml scan/action.yml; do
+            pin="$(sed -n "s/.*inputs\.cli-version || '\([^']*\)'.*/\1/p" "$file")"
 
-          if [ -z "$pin" ]; then
-            echo "::error::Could not read the engine pin from .github/workflows/scan.yml." \
-                 "The line this reads may have been reworded — fix this check rather than" \
-                 "leaving it to pass by finding nothing."
-            exit 1
-          fi
-          echo "pinned: $pin"
+            if [ -z "$pin" ]; then
+              echo "::error::Could not read the engine pin from ${file}." \
+                   "The line this reads may have been reworded — fix this check rather than" \
+                   "leaving it to pass by finding nothing."
+              exit 1
+            fi
+            # EXACTLY ONE PIN PER FILE. Two would make `pin` two lines, and a check that judged only
+            # one of them would pass the other unread.
+            if [ "$(printf '%s\n' "$pin" | wc -l)" -ne 1 ]; then
+              echo "::error::${file} carries more than one engine pin; each file must carry exactly one."
+              exit 1
+            fi
+            echo "${file} pins: $pin"
 
-          # AN EXACT VERSION. A range or a dist-tag silently takes whatever was published last,
-          # which is the property the whole pin exists to deny.
-          if ! printf '%s' "$pin" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
-            echo "::error::'$pin' is not an exact version. A range or a tag takes whatever npm" \
-                 "served most recently, and every caller of this workflow would inherit it."
-            exit 1
-          fi
+            # AN EXACT VERSION. A range or a dist-tag silently takes whatever was published last,
+            # which is the property the whole pin exists to deny.
+            if ! printf '%s' "$pin" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+              echo "::error::'$pin' is not an exact version. A range or a tag takes whatever npm" \
+                   "served most recently, and every caller of this workflow would inherit it."
+              exit 1
+            fi
 
-          size="$(npm view "@cupel-sh/cli@${pin}" dist.unpackedSize 2>/dev/null || true)"
+            size="$(npm view "@cupel-sh/cli@${pin}" dist.unpackedSize 2>/dev/null || true)"
 
-          if [ -z "$size" ]; then
-            echo "::error::@cupel-sh/cli@${pin} is not published, or npm would not answer." \
-                 "Every caller of this workflow is currently pinned to it."
-            exit 1
-          fi
+            if [ -z "$size" ]; then
+              echo "::error::@cupel-sh/cli@${pin} is not published, or npm would not answer." \
+                   "Every caller of ${file} is currently pinned to it."
+              exit 1
+            fi
 
-          # THE FLOOR IS A PLAUSIBILITY TEST, NOT A MEASUREMENT. The real bundle is ~220 KB
-          # unpacked; the stub was 684 bytes. 10 KB sits far from both, so it cannot be
-          # tripped by an ordinary release and cannot be passed by a placeholder. It is
-          # deliberately not derived from whatever was last published — that number moves, and
-          # the next stub may not repeat the last one's size.
-          if [ "$size" -lt 10240 ]; then
-            echo "::error::@cupel-sh/cli@${pin} unpacks to ${size} bytes. That is a STUB, not" \
-                 "an engine — it will install, print, exit 0, and scan nothing, which reads as" \
-                 "a GREEN run and a dashboard that says the project was never scanned."
-            exit 1
-          fi
+            # THE FLOOR IS A PLAUSIBILITY TEST, NOT A MEASUREMENT. The real bundle is ~220 KB
+            # unpacked; the stub was 684 bytes. 10 KB sits far from both, so it cannot be
+            # tripped by an ordinary release and cannot be passed by a placeholder. It is
+            # deliberately not derived from whatever was last published — that number moves, and
+            # the next stub may not repeat the last one's size.
+            if [ "$size" -lt 10240 ]; then
+              echo "::error::@cupel-sh/cli@${pin} unpacks to ${size} bytes. That is a STUB, not" \
+                   "an engine — it will install, print, exit 0, and scan nothing, which reads as" \
+                   "a GREEN run and a dashboard that says the project was never scanned."
+              exit 1
+            fi
 
-          echo "ok: @cupel-sh/cli@${pin} is published and unpacks to ${size} bytes"
+            echo "ok: ${file}: @cupel-sh/cli@${pin} is published and unpacks to ${size} bytes"
+          done

@@ -17,12 +17,11 @@ GitHub intersects the two.
 
 It asks for no `contents: write`, no `pull-requests: write`, and no access to caller secrets.
 
-With the `run` input set, and only then, a second job, `record`, checks out the caller's repository
-and runs the caller's own command under two preloads that record which packages load. That job
-holds `contents: read` and nothing else: no id-token, no secrets. The scan job, which holds the
-id-token, never runs caller code and starts on its own runner. The one file that crosses between
-them is downloaded by artifact id, checked against its recorded digest, and parsed by the engine as
-hostile input: nothing in it can make a finding's verdict safer than the scan without it.
+`record/action.yml` and `scan/action.yml` are composite actions a caller runs in a job of their own,
+under that job's permissions. `record` runs the caller's own command under two preloads that note
+which packages load, and writes one file outside the checkout; `scan` runs the engine there and reads
+it. Neither asks for a permission. The reusable workflow above never runs caller code; these two
+exist for jobs that already do, and the README says what that means for the caller's credential.
 
 ## Pins
 

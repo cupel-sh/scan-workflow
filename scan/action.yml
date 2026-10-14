@@ -1,0 +1,112 @@
+name: cupel scan
+description: >-
+  Scan with cupel in your own job, after your own setup, and push the findings. Reads the file
+  cupel-sh/scan-workflow/record wrote, when you give it one.
+
+# WHERE THIS RUNS: in YOUR job. The reusable workflow (.github/workflows/scan.yml) remains the way to
+# scan on a runner where none of your code has run; this action is for a job that has run some, such
+# as the tests `record` observed, a build, or your own installs. What ran before it on the same
+# runner could change what it runs, as it could for any tool you run after your tests. The README's
+# "Runtime evidence, in a job of your own" says how to keep that small.
+#
+# THE CREDENTIAL, ONLY IN THIS STEP. `token` (a project token from the dashboard, from your secrets)
+# is put in this step's environment and no other, so the steps before it never see it. Without it,
+# the engine uses the job's GitHub id-token, which needs `id-token: write` on the job, and an
+# id-token on the job is available to every step in it, your tests included.
+
+inputs:
+  evidence:
+    description: >-
+      The file `cupel-sh/scan-workflow/record` wrote (its `evidence` output). Empty runs the scan
+      without runtime evidence. The engine refuses a file inside the scanned directory.
+    required: false
+    default: ""
+  token:
+    description: >-
+      A project token from the dashboard, from your secrets. Preferred over `id-token: write` on the
+      job, which every step of the job could use.
+    required: false
+    default: ""
+  push:
+    description: Push the findings to the dashboard. `false` scans and prints only.
+    required: false
+    default: "true"
+  working-directory:
+    description: Directory to scan, for a repository whose project is not at the root.
+    required: false
+    default: "."
+  entry:
+    description: >-
+      The file your application starts from, when cupel cannot work it out. One per line for an app
+      with several roots.
+    required: false
+    default: ""
+  exclude:
+    description: >-
+      Files to leave out of the source-file count, in .gitignore syntax, one pattern per line. It
+      changes what is counted, never what the analysis follows.
+    required: false
+    default: ""
+  x-go:
+    description: >-
+      Scan Go modules, at package level, from the modules your job already downloaded. `false` keeps
+      the scan before Go.
+    required: false
+    default: "true"
+  cli-version:
+    description: >-
+      Pin a specific @cupel-sh/cli version instead of the one this action ships. Runtime evidence
+      needs 0.16.0 or later, as an exact version.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Scan
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        CUPEL_CLI_VERSION: ${{ inputs.cli-version || '0.16.0' }}
+        CUPEL_TOKEN: ${{ inputs.token }}
+        CUPEL_EVIDENCE: ${{ inputs.evidence }}
+        CUPEL_PUSH: ${{ inputs.push }}
+        CUPEL_ENTRY: ${{ inputs.entry }}
+        CUPEL_EXCLUDE: ${{ inputs.exclude }}
+        CUPEL_X_GO: ${{ inputs.x-go }}
+      run: |
+        set -u
+        set -- scan
+        while IFS= read -r line; do
+          [ -n "$line" ] && set -- "$@" --entry "$line"
+        done <<< "$CUPEL_ENTRY"
+        while IFS= read -r line; do
+          [ -n "$line" ] && set -- "$@" --exclude "$line"
+        done <<< "$CUPEL_EXCLUDE"
+        # Go explicitly on or off, as the reusable workflow passes it, so the scan does not depend on
+        # which way the pinned engine defaults.
+        if [ "$CUPEL_X_GO" = "false" ]; then
+          set -- "$@" --no-go
+        else
+          set -- "$@" --x-go
+        fi
+        # Runtime evidence when given a file; given a path that is not there, said out loud, and the
+        # scan is the static one. An engine older than 0.16.0 does not read evidence, so it is refused
+        # rather than handed a flag it does not know.
+        if [ -n "$CUPEL_EVIDENCE" ]; then
+          if ! printf '%s\n' "$CUPEL_CLI_VERSION" | awk -F. '
+              /^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$/ { ok = ($1 > 0 || $2 >= 16) }
+              END { exit (ok ? 0 : 1) }'; then
+            echo "::error::runtime evidence needs @cupel-sh/cli 0.16.0 or later, as an exact version, and this step was given '${CUPEL_CLI_VERSION}'"
+            exit 1
+          fi
+          if [ -f "$CUPEL_EVIDENCE" ]; then
+            set -- "$@" --runtime-evidence "$CUPEL_EVIDENCE"
+          else
+            echo "::warning::evidence names a file that is not there; this scan is the static one"
+          fi
+        fi
+        if [ "$CUPEL_PUSH" != "false" ]; then
+          set -- "$@" --push
+        fi
+        npx --yes "@cupel-sh/cli@${CUPEL_CLI_VERSION}" "$@"
