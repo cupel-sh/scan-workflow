@@ -206,6 +206,48 @@ jobs:
             echo "::warning::the Python environment could not be installed; the scan will report it as missing rather than read a partial one"
           fi
 
+      # NODE, ON EVERY SCAN (the founder, 2026-10-16: "always, like Python and Go"). The engine
+      # reads a Node project's dependencies from `node_modules`, the way it reads Python's from
+      # `.venv`, and a checkout has none. Without them every package import resolves nowhere and
+      # the scan holds it as `resolution-divergence`: honest, but it can decide nothing inside a
+      # dependency (measured on habitica: 0 not-reachable without `node_modules`, 45 with them).
+      # So the tree is installed first, from every npm lockfile in it, directory by directory. A project whose own install runs a nested one (habitica's root
+      # `postinstall` installs `website/client`) would otherwise be half installed, because
+      # `--ignore-scripts` stops the nested install too.
+      #
+      # `--ignore-scripts` IS LOAD-BEARING, as `--no-build` is for Python: no install script of any
+      # dependency runs in a job that holds an id-token. IT NEEDS npm 11. npm 10, which the
+      # runner's Node ships, still runs a git dependency's `prepare` script under `--ignore-scripts`;
+      # npm 11.12.1 does not. Both were measured on 2026-10-16 against a git dependency whose
+      # `prepare` writes a file, with a control (no flag) where it does. So the install runs that
+      # exact npm, pinned like the engine below.
+      #
+      # A failed install removes that directory's partial `node_modules`, so the scan reads it as
+      # not installed (every package held) rather than read a partial tree as the deployed one.
+      # pnpm and yarn lockfiles are named, not installed.
+      - name: Install the Node dependencies
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          set -u
+          prune=( '(' -type d '(' -name node_modules -o -name '.?*' ')' ')' -prune -o )
+          mapfile -d '' -t dirs < <(
+            find . "${prune[@]}" -type f '(' -name package-lock.json -o -name npm-shrinkwrap.json ')' -print0 \
+              | xargs -0 -r -n1 dirname -z | sort -zu
+          )
+          if [ "${#dirs[@]}" -eq 0 ]; then
+            echo "no npm lockfile here; skipping"
+          fi
+          for dir in "${dirs[@]}"; do
+            echo "installing the Node dependencies in ${dir}: npm 11.12.1 ci --ignore-scripts"
+            if ! (cd "$dir" && npx --yes npm@11.12.1 ci --ignore-scripts --no-audit --no-fund); then
+              rm -rf "${dir:?}/node_modules"
+              echo "::warning::the Node dependencies in ${dir} could not be installed; the scan reads that directory as not installed rather than read a partial tree"
+            fi
+          done
+          if find . "${prune[@]}" -type f '(' -name pnpm-lock.yaml -o -name yarn.lock ')' -print | grep -q .; then
+            echo "::warning::a pnpm or yarn lockfile is present and this workflow installs npm lockfiles only. Install those dependencies in a step before this job (any node_modules is read), or the scan holds their packages as not installed."
+          fi
+
       # GO, ONLY WHEN ASKED (`x-go`). The engine reads a Go project the way the go command builds
       # it: `go list`, with the Go on the runner and the module cache, fetching nothing. A checkout
       # alone gives it too little. The runner's module cache is empty, so every third-party module

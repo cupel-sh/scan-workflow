@@ -160,6 +160,20 @@ skips dependency and build directories. To leave out anything else, list pattern
         **/*.generated.ts
 ```
 
+### npm dependencies
+
+The engine reads a Node project's dependencies from `node_modules`, and a checkout has none. Without them every
+package import resolves nowhere, and nothing inside a dependency can be decided. So every scan first runs
+`npm ci --ignore-scripts` in every directory that holds an npm lockfile (`package-lock.json` or
+`npm-shrinkwrap.json`). A project whose own install runs a nested one is installed directory by directory.
+
+- **No dependency code runs.** `--ignore-scripts` stops every install script. The job uses npm 11, because npm 10
+  still runs a git dependency's `prepare` script under that flag.
+- **A failed install is not read as a partial tree.** For example, a private package the runner cannot fetch: that
+  directory's `node_modules` is removed, and its packages read as not installed.
+- **pnpm and yarn lockfiles are named, not installed.** Install those in a step before this job; any `node_modules`
+  is read.
+
 ### Go (`x-go`)
 
 Go scanning is **on by default** from engine 0.15.0, and it needs engine **0.14.0 or later**. A Go
