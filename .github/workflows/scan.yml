@@ -86,6 +86,25 @@ on:
         required: false
         type: string
         default: ""
+      x-package-denials:
+        description: >-
+          Let the scan decide not-reachable for an npm package your application never loads, while
+          a dependency's own dynamic loader could in principle load it. Each such verdict says it
+          assumes no dependency loader loads the package. Off by default. It needs engine 0.16.0
+          or later: with an older `cli-version` the run fails before anything is scanned.
+        required: false
+        type: boolean
+        default: false
+      x-symbol-denials:
+        description: >-
+          Everything `x-package-denials` does, and also bound your application's own computed
+          loads (a `require` or `import` whose path is built at run time) over the files the scan
+          read. Each verdict that rests on that says it assumes the deployed dependencies are the
+          ones scanned. Off by default. It needs engine 0.16.0 or later, and a dashboard that
+          reads ingest v20: with an older `cli-version` the run fails before anything is scanned.
+        required: false
+        type: boolean
+        default: false
 
 # Narrowed here as well as by the caller. The intersection means this cannot grant anything,
 # but stating it means a repository that grants broadly still runs this job with only what it
@@ -388,6 +407,8 @@ jobs:
           CUPEL_ENTRY: ${{ inputs.entry }}
           CUPEL_EXCLUDE: ${{ inputs.exclude }}
           CUPEL_X_GO: ${{ inputs.x-go }}
+          CUPEL_X_PACKAGE_DENIALS: ${{ inputs.x-package-denials }}
+          CUPEL_X_SYMBOL_DENIALS: ${{ inputs.x-symbol-denials }}
           # The same go-private patterns, so every go command this job runs is told the same
           # thing. The engine fetches nothing whatever they say: it runs the go command with
           # GOPROXY=off and replaces GONOPROXY with a pattern that matches nothing.
@@ -434,6 +455,24 @@ jobs:
               :
             else
               set -- "$@" --no-go
+            fi
+          fi
+          # NOT-REACHABLE, ONLY WHEN ASKED, FROM ENGINE 0.16.0 ONLY. 0.16.0 is the first engine that
+          # caps a package any installed package's install script can load,
+          # so an older engine can call a package not reachable when an install script runs it. A
+          # range or a tag cannot be checked, so it is refused the same way: name an exact version.
+          # `--x-symbol-denials` turns `--x-package-denials` on too, so only one is passed.
+          if [ "$CUPEL_X_PACKAGE_DENIALS" = "true" ] || [ "$CUPEL_X_SYMBOL_DENIALS" = "true" ]; then
+            if ! printf '%s\n' "$CUPEL_CLI_VERSION" | awk -F. '
+                /^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$/ { ok = ($1 > 0 || $2 >= 16) }
+                END { exit (ok ? 0 : 1) }'; then
+              echo "::error::x-package-denials and x-symbol-denials need @cupel-sh/cli 0.16.0 or later, as an exact version, and this run was given '${CUPEL_CLI_VERSION}'. Remove the cli-version pin or raise it, or turn them off."
+              exit 1
+            fi
+            if [ "$CUPEL_X_SYMBOL_DENIALS" = "true" ]; then
+              set -- "$@" --x-symbol-denials
+            else
+              set -- "$@" --x-package-denials
             fi
           fi
           set -- "$@" --push

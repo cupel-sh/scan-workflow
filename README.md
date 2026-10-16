@@ -97,6 +97,8 @@ is a decision you can audit rather than one you have to take on faith.
 | `exclude` | — | Files to leave out of the source-file count, `.gitignore` syntax, one per line. |
 | `x-go` | `true` | Scan Go modules, at package level; `false` keeps the scan before Go. Needs engine 0.14.0 or later. See [Go](#go-x-go). |
 | `go-private` | `github.com/<owner>/*` in a private repository | With `x-go`: Go modules never sent to a proxy or downloaded. See [Go](#go-x-go). |
+| `x-package-denials` | `false` | Decide not-reachable for an npm package the application never loads, assuming no dependency loader loads it. Needs engine 0.16.0. See [Not-reachable](#not-reachable-x-package-denials-x-symbol-denials). |
+| `x-symbol-denials` | `false` | `x-package-denials`, and bound the application's own computed loads over the scanned files. Needs engine 0.16.0. See [Not-reachable](#not-reachable-x-package-denials-x-symbol-denials). |
 
 ### Entries that a build produces
 
@@ -234,6 +236,33 @@ With a `cli-version` older than 0.14.0, or one that is not an exact version, `x-
 before anything is scanned. With `x-go: false` the scan is given `--no-go`, except under an exact
 `cli-version` below 0.14.0, which scans no Go anyway. Older engines can call a Go dependency clean when it is not, and a
 failed run is the honest outcome.
+
+### Not-reachable (`x-package-denials`, `x-symbol-denials`)
+
+Both are **off by default**, and both need engine **0.16.0 or later**. With either on, an npm advisory
+can read **not-reachable** when the application never loads the package. That also needs:
+
+- no file the application loads names it;
+- no install script of it, or of any installed package above it, can run it;
+- the advisory's fix changed library code only.
+
+Every such verdict says what it rests on:
+
+- `x-package-denials`: **"assumed: no dependency loader loads it"**. A dependency that loads code by
+  computed path could, in principle, load the package, and the verdict says that it assumes none does.
+- `x-symbol-denials`: the same, and the scan also bounds the **application's own** computed loads over
+  the files it read. A verdict that rests on that bound also says **"the deployed dependencies are the
+  ones scanned"**. Run the scan on the dependency tree you deploy.
+
+```yaml
+    uses: cupel-sh/scan-workflow/.github/workflows/scan.yml@v1
+    with:
+      x-symbol-denials: true
+```
+
+With a `cli-version` older than 0.16.0, or one that is not an exact version, either input fails the run
+before anything is scanned. An older engine can call a package not reachable when an install script
+runs it, and a failed run is the honest outcome.
 
 ## Reporting a problem
 
